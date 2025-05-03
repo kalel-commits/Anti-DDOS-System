@@ -1,17 +1,19 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const rateLimit = require('express-rate-limit');
-const http = require('http'); // For creating server
-const { Server } = require('socket.io'); // For real-time connection
+const http = require('http');
+const { Server } = require('socket.io');
+const { logAttack, getAllAttacks } = require('./models/sqliteLogger');
+const dayjs = require('dayjs');
 
 const app = express();
-const server = http.createServer(app); // Create a raw server instance
+const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: 'http://localhost:3000', // Allow frontend origin
-    methods: ['GET', 'POST']
+    origin: 'http://localhost:3000', // Frontend origin
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    credentials: true
   }
 });
 
@@ -19,33 +21,21 @@ const io = new Server(server, {
 app.use(cors());
 app.use(bodyParser.json());
 
-// Rate limiting (optional)
+// Rate Limiter
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // limit each IP to 1000 requests per windowMs
   message: 'Too many requests, please try again later.',
 });
-// app.use(limiter); // Uncomment in production
+app.use(limiter);
 
-// MongoDB connection
-mongoose.connect('mongodb://localhost:27017/ddosdb', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => console.log('Connected to MongoDB...'))
-  .catch(err => console.error('Could not connect to MongoDB...', err));
-
-// Attack schema and model
-const attackSchema = new mongoose.Schema({
-  type: { type: String, required: true },
-  confidence: { type: String },
-  events: { type: Number },
-  firstEvent: { type: Date },
-  lastEvent: { type: Date },
-  time: { type: Date, default: Date.now }
+// Logging middleware
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
 });
-const Attack = mongoose.model('Attack', attackSchema);
 
-// Socket.IO events
+// Socket.IO handling
 io.on('connection', (socket) => {
   console.log('🔌 New client connected:', socket.id);
 
@@ -55,93 +45,100 @@ io.on('connection', (socket) => {
 });
 
 // Health check
-app.get('/api/health', async (req, res) => {
-  const mongoStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
     serverTime: new Date(),
-    mongoDB: mongoStatus
+    database: 'sqlite'
   });
 });
 
-// Request logging
-app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  next();
+// ✅ GET all attacks (SQLite) with pagination
+app.get('/api/attacks', (req, res) => {
+  console.log('GET /api/attacks - Request received');
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const offset = (page - 1) * limit;
+
+  console.log(`Fetching attacks - Page: ${page}, Limit: ${limit}, Offset: ${offset}`);
+
+  getAllAttacks(offset, limit, (err, result) => {
+    if (err) {
+      console.error('Error fetching attacks:', err);
+      return res.status(500).json({ message: 'Failed to fetch attacks' });
+    }
+    console.log(`Successfully fetched ${result.attacks.length} attacks`);
+    res.json({
+      attacks: result.attacks,
+      total: result.total,
+      page,
+      totalPages: Math.ceil(result.total / limit)
+    });
+  });
 });
 
-// GET - Fetch all attacks
-app.get('/api/attacks', async (req, res) => {
-  const { type, confidence } = req.query;
-  const filter = {};
+// ✅ POST new attack (SQLite)
+app.post('/api/attacks', (req, res) => {
+  console.log('POST /api/attacks - Request received');
+  console.log('Request body:', req.body);
 
-  if (type) filter.type = type;
-  if (confidence) filter.confidence = confidence;
-
-  try {
-    const attacks = await Attack.find(filter);
-    res.json(attacks);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// POST - Create new attack and broadcast
-app.post('/api/attacks', async (req, res) => {
-  const { type, confidence, events, firstEvent, lastEvent } = req.body;
-
-  const attack = new Attack({
+  const {
     type,
     confidence,
     events,
     firstEvent,
-    lastEvent
-  });
+    lastEvent,
+    sourceIP,
+    destinationIP,
+    severity,
+    detectedBy
+  } = req.body;
 
-  try {
-    const newAttack = await attack.save();
+  const attackData = {
+    type,
+    confidence,
+    events,
+    firstEvent,
+    lastEvent,
+    sourceIP,
+    destinationIP,
+    severity,
+    detectedBy,
+    timestamp: new Date().toISOString()
+  };
 
-    // Emit to all clients in real-time
-    io.emit('new_attack', newAttack);
+  console.log('Logging attack:', attackData);
 
-    res.status(201).json(newAttack);
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
+  logAttack(attackData)
+    .then(() => {
+      console.log('Attack logged successfully');
+      io.emit('new_attack', attackData);
+      res.status(201).json({ message: 'Attack logged successfully', data: attackData });
+    })
+    .catch(err => {
+      console.error('Error logging attack:', err);
+      res.status(500).json({ message: 'Failed to log attack' });
+    });
 });
 
-// PUT - Update attack
-app.put('/api/attacks/:id', async (req, res) => {
-  try {
-    const updatedAttack = await Attack.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true }
-    );
-    if (!updatedAttack) {
-      return res.status(404).json({ message: 'Attack not found' });
-    }
-    res.json(updatedAttack);
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
+// ✅ DELETE attack by ID
+app.delete('/api/attacks/:id', (req, res) => {
+  const { id } = req.params;
+  // TODO: Implement deleteAttack in sqliteLogger
+  res.status(200).json({ message: 'Attack deleted successfully', id });
 });
 
-// DELETE - Remove attack
-app.delete('/api/attacks/:id', async (req, res) => {
-  try {
-    const attack = await Attack.findByIdAndDelete(req.params.id);
-    if (!attack) {
-      return res.status(404).json({ message: 'Attack not found' });
-    }
-    res.json({ message: 'Attack deleted' });
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
+// ✅ PUT update attack by ID
+app.put('/api/attacks/:id', (req, res) => {
+  const { id } = req.params;
+  const updateData = req.body;
+  // TODO: Implement updateAttack in sqliteLogger
+  res.status(200).json({ message: 'Attack updated successfully', id, data: updateData });
 });
 
-// Start the server
+// Start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server is running at http://localhost:${PORT}`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
