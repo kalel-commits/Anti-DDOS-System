@@ -4,14 +4,15 @@ const bodyParser = require('body-parser');
 const rateLimit = require('express-rate-limit');
 const http = require('http');
 const { Server } = require('socket.io');
-const { logAttack, getAllAttacks } = require('./models/sqliteLogger');
+const { logAttack, getAllAttacks, getDashboardStats, getAttackTimeline } = require('./models/sqliteLogger');
 const dayjs = require('dayjs');
+const { exec } = require('child_process');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: 'http://localhost:3000', // Frontend origin
+    origin: 'http://localhost:3000',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true
   }
@@ -24,7 +25,7 @@ app.use(bodyParser.json());
 // Rate Limiter
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // limit each IP to 1000 requests per windowMs
+  max: 1000,
   message: 'Too many requests, please try again later.',
 });
 app.use(limiter);
@@ -53,21 +54,41 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// ✅ GET all attacks (SQLite) with pagination
+// Function to block IP using iptables
+function blockIP(ip) {
+  if (!ip || typeof ip !== 'string') {
+    console.error('Invalid IP address');
+    return Promise.reject('Invalid IP address');
+  }
+
+  const cmd = `sudo iptables -A INPUT -s ${ip} -j DROP`;
+
+  return new Promise((resolve, reject) => {
+    exec(cmd, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Error blocking IP ${ip}:`, error.message);
+        return reject(error);
+      }
+      if (stderr) {
+        console.error(`iptables stderr: ${stderr}`);
+      }
+      console.log(`IP ${ip} blocked successfully.`);
+      resolve(stdout);
+    });
+  });
+}
+
+// GET all attacks
 app.get('/api/attacks', (req, res) => {
-  console.log('GET /api/attacks - Request received');
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 20;
   const offset = (page - 1) * limit;
-
-  console.log(`Fetching attacks - Page: ${page}, Limit: ${limit}, Offset: ${offset}`);
 
   getAllAttacks(offset, limit, (err, result) => {
     if (err) {
       console.error('Error fetching attacks:', err);
       return res.status(500).json({ message: 'Failed to fetch attacks' });
     }
-    console.log(`Successfully fetched ${result.attacks.length} attacks`);
     res.json({
       attacks: result.attacks,
       total: result.total,
@@ -77,11 +98,30 @@ app.get('/api/attacks', (req, res) => {
   });
 });
 
-// ✅ POST new attack (SQLite)
-app.post('/api/attacks', (req, res) => {
-  console.log('POST /api/attacks - Request received');
-  console.log('Request body:', req.body);
+// GET dashboard stats
+app.get('/api/dashboard-stats', (req, res) => {
+  getDashboardStats((err, stats) => {
+    if (err) {
+      console.error('Error fetching dashboard stats:', err);
+      return res.status(500).json({ message: 'Failed to fetch dashboard statistics' });
+    }
+    res.json(stats);
+  });
+});
 
+// GET attack timeline
+app.get('/api/attacks/timeline', (req, res) => {
+  getAttackTimeline((err, timelineData) => {
+    if (err) {
+      console.error('Error fetching timeline data:', err);
+      return res.status(500).json({ message: 'Failed to fetch timeline data' });
+    }
+    res.json(timelineData);
+  });
+});
+
+// POST new attack with iptables block
+app.post('/api/attacks', (req, res) => {
   const {
     type,
     confidence,
@@ -107,32 +147,32 @@ app.post('/api/attacks', (req, res) => {
     timestamp: new Date().toISOString()
   };
 
-  console.log('Logging attack:', attackData);
-
   logAttack(attackData)
     .then(() => {
-      console.log('Attack logged successfully');
       io.emit('new_attack', attackData);
-      res.status(201).json({ message: 'Attack logged successfully', data: attackData });
+
+      // Block the source IP using iptables
+      return blockIP(sourceIP);
+    })
+    .then(() => {
+      res.status(201).json({ message: 'Attack logged and source IP blocked', data: attackData });
     })
     .catch(err => {
-      console.error('Error logging attack:', err);
-      res.status(500).json({ message: 'Failed to log attack' });
+      console.error('Error:', err);
+      res.status(500).json({ message: 'Failed to log attack or block IP' });
     });
 });
 
-// ✅ DELETE attack by ID
+// DELETE attack by ID placeholder
 app.delete('/api/attacks/:id', (req, res) => {
   const { id } = req.params;
-  // TODO: Implement deleteAttack in sqliteLogger
   res.status(200).json({ message: 'Attack deleted successfully', id });
 });
 
-// ✅ PUT update attack by ID
+// PUT update attack by ID placeholder
 app.put('/api/attacks/:id', (req, res) => {
   const { id } = req.params;
   const updateData = req.body;
-  // TODO: Implement updateAttack in sqliteLogger
   res.status(200).json({ message: 'Attack updated successfully', id, data: updateData });
 });
 
@@ -141,4 +181,3 @@ const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
-

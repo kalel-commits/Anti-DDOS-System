@@ -7,6 +7,6 @@ const attackSchema = new mongoose.Schema({
   type: String,
   severity: String,
   detectedBy: String,
-});
+}); 
 
 module.exports = mongoose.model('Attack', attackSchema);
