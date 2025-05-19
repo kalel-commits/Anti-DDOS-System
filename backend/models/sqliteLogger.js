@@ -1,8 +1,20 @@
 const sqlite3 = require('sqlite3').verbose();
-const db = new sqlite3.Database('./attacks.db');
+const path = require('path');
+const fs = require('fs');
+
+// Use in-memory database for testing
+console.log('Using in-memory SQLite database');
+const db = new sqlite3.Database(':memory:', (err) => {
+  if (err) {
+    console.error('Error opening database:', err);
+    process.exit(1);
+  }
+  console.log('Connected to in-memory SQLite database');
+});
 
 // Create table with index
 db.serialize(() => {
+  console.log('Creating tables...');
   db.run(`
     CREATE TABLE IF NOT EXISTS attacks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -17,10 +29,22 @@ db.serialize(() => {
       detectedBy TEXT,
       timestamp TEXT
     )
-  `);
+  `, (err) => {
+    if (err) {
+      console.error('Error creating attacks table:', err);
+    } else {
+      console.log('Attacks table created successfully');
+    }
+  });
 
   // Create index on timestamp for faster queries
-  db.run('CREATE INDEX IF NOT EXISTS idx_attacks_timestamp ON attacks(timestamp)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_attacks_timestamp ON attacks(timestamp)', (err) => {
+    if (err) {
+      console.error('Error creating timestamp index:', err);
+    } else {
+      console.log('Timestamp index created successfully');
+    }
+  });
 });
 
 // Function to log a new attack into the database
@@ -30,29 +54,48 @@ function logAttack(attackData) {
     sourceIP, destinationIP, severity, detectedBy, timestamp
   } = attackData;
 
+  console.log('Attempting to log attack:', attackData);
+
   return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO attacks (
-        type, confidence, events, firstEvent, lastEvent,
-        sourceIP, destinationIP, severity, detectedBy, timestamp
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        type,
-        confidence,
-        events,
-        firstEvent,
-        lastEvent,
-        sourceIP,
-        destinationIP,
-        severity,
-        detectedBy,
-        timestamp || new Date().toISOString() // Default to current timestamp if not provided
-      ],
-      function(err) {
-        if (err) reject(err); // Reject the promise if there's an error
-        else resolve(this.lastID); // Resolve with the ID of the newly inserted attack
+    const values = [
+      type,
+      String(confidence), // Convert confidence to string
+      Number(events),     // Ensure events is a number
+      firstEvent,
+      lastEvent,
+      sourceIP,
+      destinationIP,
+      severity,
+      detectedBy,
+      timestamp || new Date().toISOString()
+    ];
+
+    console.log('Inserting values:', values);
+
+    const sql = `INSERT INTO attacks (
+      type, confidence, events, firstEvent, lastEvent,
+      sourceIP, destinationIP, severity, detectedBy, timestamp
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+    console.log('SQL:', sql);
+    console.log('Values:', values);
+
+    db.run(sql, values, function(err) {
+      if (err) {
+        console.error('Database error:', err);
+        console.error('Error details:', {
+          code: err.code,
+          message: err.message,
+          stack: err.stack,
+          sql: sql,
+          values: values
+        });
+        reject(err);
+      } else {
+        console.log('Attack logged successfully with ID:', this.lastID);
+        resolve(this.lastID);
       }
-    );
+    });
   });
 }
 
